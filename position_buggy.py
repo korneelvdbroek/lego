@@ -9,10 +9,7 @@ import umath
 
 
 class Buggy:
-    # buggy characteristics
-    cm_for_1000_degrees = 153. / 1106. * 1000  # distance in cm when drive-engine rotates 1000 degrees
-    steer_angle_max = 15  # max angle of front wheels
-    buggy_length_cm = 15.5  # distance between front and back axel
+    cm_for_1000_degrees = 153. / 1106. * 1000
 
     def __init__(self):
         print()
@@ -25,7 +22,7 @@ class Buggy:
         # Initialize the motors.
         try:
             self._engine_steer = Motor(Port.A)
-            self._engine_drive = Motor(Port.C, Direction.COUNTERCLOCKWISE)
+            self._engine_drive = Motor(Port.B, Direction.COUNTERCLOCKWISE)
         except Exception as e:
             # flash magenta: issue with motors
             self.hub.light.animate(colors=[Color.RED, Color.BLACK], interval=250)
@@ -46,6 +43,11 @@ class Buggy:
         self.engine_steer_angle_max = self.calibrate_steer()
         print(f"Steering initialized...")
 
+        # drive settings
+        self.drive_speed = 1000
+        self.engine_steer_angle = 1.00 * self.engine_steer_angle_max
+        self.wheel_steer_angle_max = 25
+        assert self.engine_steer_angle <= self.engine_steer_angle_max, f"chosen steer_angle ({self.engine_steer_angle}) needs to be smaller than the engine_steer_angle_max ({self.engine_steer_angle_max})"
         # Lower the acceleration so the car starts and stops realistically.
         self._engine_drive.control.limits(acceleration=1000)
 
@@ -53,6 +55,7 @@ class Buggy:
         self._program_stop = False
         self.x = 0
         self.y = 0
+        self.total_drive_angle = 0
         self.direction_angle = 0
 
         # initialization finished
@@ -68,7 +71,7 @@ class Buggy:
         # We are now at the right. Reset this angle to be half the difference.
         # That puts zero in the middle.
         self._engine_steer.reset_angle(right_end - (right_end + left_end) / 2)
-        engine_steer_angle_max = 0.9 * self._engine_steer.angle()
+        engine_steer_angle_max = 0.8 * self._engine_steer.angle()
 
         # reset steer to neutral position
         self._engine_steer.run_target(speed=200, target_angle=0, wait=True)
@@ -82,6 +85,7 @@ class Buggy:
             # drive angle
             drive_angle = self._engine_drive.angle()
             drive_angle_delta = drive_angle - drive_angle_old
+            self.total_drive_angle += drive_angle_delta
 
             # distance
             distance_delta = self.drive_angle_to_cm(drive_angle_delta)
@@ -94,8 +98,6 @@ class Buggy:
             self.y += distance_delta * umath.sin(self.direction_angle / 180 * umath.pi)
 
             print(f"(x, y) = ({self.x}, {self.y})   (angle = {self.direction_angle})")
-            # crash detection
-            print(f"  (a_x, a_y) = ({self.hub.imu.acceleration(Axis.X)}, {self.hub.imu.acceleration(Axis.Y)})")
             await wait(10)
 
             #
@@ -108,34 +110,17 @@ class Buggy:
     async def drive_angle(self, speed, angle):
         drive_angle_start = self._engine_drive.angle()
         self._engine_drive.run(speed)
-        while self._engine_drive.angle() < drive_angle_start + angle and not self._engine_drive.stalled():
+        while self._engine_drive.angle() < drive_angle_start + angle:
             await wait(20)
         self._engine_drive.stop()
 
     async def drive_distance(self, speed, distance_cm):
         await self.drive_angle(speed, self.cm_to_drive_angle(distance_cm))
 
-    async def drive_xy(self, x_target, y_target, speed=500):
-        if x_target >= self.x:
-            self._engine_drive.run(speed)
-        else:
-            # drive backwards
-            self._engine_drive.run(-speed)
-
-        accepted_error_cm = 20
-        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2 and not self._engine_drive.stalled():
-            # see backup computation
-            steer_angle = 180 / umath.pi * umath.atan2(self.buggy_length_cm * (y_target - self.y),
-                                                       2 * ((x_target - self.x) ** 2 + (y_target - self.y) ** 2))
-
-            steer_angle = min(max(steer_angle, -self.steer_angle_max), self.steer_angle_max)
-            engine_steer_angle = steer_angle / self.steer_angle_max * self.engine_steer_angle_max
-            print(f"steer_angle = {steer_angle} (engine_steer_angle = {engine_steer_angle})")
-
-            self._engine_steer.run_target(speed=500, target_angle=engine_steer_angle, wait=False)
-            await wait(20)
-        self._engine_drive.stop()
-        self._engine_steer.stop()
+    async def drive_xy(self, x_target, y_target):
+        x = self.x
+        y = self.y
+        x_circle_center = ((x_target - x) ^ 2 + (y_target - y) ^ 2) / (2 * (x_target - x))
 
     async def stop(self):
         self._engine_drive.stop()
@@ -156,10 +141,9 @@ buggy = Buggy()
 async def buggy_program():
     # await buggy.drive_angle(500, 1000)
     # await wait(1000)
-    # await buggy.drive_distance(200, 100)
-    # await buggy.drive_distance(200, 100)
-    await buggy.drive_xy(x_target=300, y_target=0)
-    # await wait(1000)
+    await buggy.drive_distance(200, 100)
+    await buggy.drive_distance(200, 100)
+    await wait(1000)
 
 
 async def buggy_program_wrapper():
