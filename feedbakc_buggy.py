@@ -6,6 +6,7 @@ from pybricks.tools import multitask, run_task
 from pybricks.geometry import Axis
 from pybricks.tools import StopWatch
 import umath
+import urandom
 
 
 class Buggy:
@@ -43,7 +44,7 @@ class Buggy:
         #     raise e
         # print(f"Remote control initialized...")
 
-        self.engine_steer_angle_max = self.calibrate_steer()
+        self.engine_steer_angle_max = self.calibrate_steering()
         print(f"Steering initialized...")
 
         # Lower the acceleration so the car starts and stops realistically.
@@ -58,7 +59,7 @@ class Buggy:
         # initialization finished
         self.hub.light.on(Color.GREEN)
 
-    def calibrate_steer(self):
+    def calibrate_steering(self):
         # Find the steering endpoint on the left and right.
         # The middle is in between.
         left_end = self._engine_steer.run_until_stalled(-500, then=Stop.BRAKE)
@@ -116,14 +117,15 @@ class Buggy:
         await self.drive_angle(speed, self.cm_to_drive_angle(distance_cm))
 
     async def drive_xy(self, x_target, y_target, speed=500):
-        if x_target >= self.x:
-            self._engine_drive.run(speed)
-        else:
-            # drive backwards
-            self._engine_drive.run(-speed)
+        # if x_target >= self.x:
+        #     self._engine_drive.run(speed)
+        # else:
+        #     # drive backwards
+        #     self._engine_drive.run(-speed)
+        self._engine_drive.run(speed)
 
         accepted_error_cm = 20
-        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2 and not self._engine_drive.stalled():
+        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2:
             # see backup computation
             steer_angle = 180 / umath.pi * umath.atan2(self.buggy_length_cm * (y_target - self.y),
                                                        2 * ((x_target - self.x) ** 2 + (y_target - self.y) ** 2))
@@ -151,6 +153,24 @@ class Buggy:
 
 
 buggy = Buggy()
+
+
+async def buggy_program2():
+    x_target = 0
+    y_target = 0
+    no_go_radius = buggy.buggy_length_cm / umath.tan(buggy.steer_angle_max)
+    for i in range(10):
+
+        while True:
+            x_target_delta = urandom.uniform(-100, 100)
+            y_target_delta = urandom.uniform(-100, 100)
+            # check if it's in the no-go zone (turn is too sharp to get there...)
+            if (x_target_delta)**2 + (y_target_delta - no_go_radius)**2 > 1.05 * no_go_radius and (x_target_delta)**2 + (y_target_delta + no_go_radius)**2 > 1.05 * no_go_radius:
+                break
+
+        x_target += x_target_delta
+        y_target += y_target_delta
+        await buggy.drive_xy(x_target, y_target)
 
 
 async def buggy_program():
