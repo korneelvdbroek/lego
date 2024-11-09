@@ -24,6 +24,7 @@ class Buggy:
         self.hub.light.animate(colors=[Color.GREEN, Color.BLACK], interval=500)
 
         # Initialize the motors.
+        print(f"Motors", end="")
         try:
             self._engine_drive = Motor(Port.A, Direction.COUNTERCLOCKWISE)
             self._engine_steer = Motor(Port.C)
@@ -32,20 +33,22 @@ class Buggy:
             self.hub.light.animate(colors=[Color.RED, Color.BLACK], interval=250)
             wait(2 * 1000)
             raise e
-        print(f"Motors initialized...")
+        print(f" initialized...")
 
         # Connect to the remote.
-        # try:
-        #     self.remote = Remote()
-        # except Exception as e:
-        #     # flash red: remote is missing
-        #     self.hub.light.animate(colors=[Color.ORANGE, Color.BLACK], interval=250)
-        #     wait(5 * 1000)
-        #     raise e
-        # print(f"Remote control initialized...")
+        print(f"Remote control", end="")
+        try:
+            self.remote = Remote()
+        except Exception as e:
+            # flash red: remote is missing
+            self.hub.light.animate(colors=[Color.ORANGE, Color.BLACK], interval=250)
+            wait(5 * 1000)
+            raise e
+        print(f" initialized...")
 
+        print(f"Steering", end="")
         self.engine_steer_angle_max_deg = self.calibrate_steering()
-        print(f"Steering initialized...")
+        print(f" initialized...")
 
         # Lower the acceleration so the car starts and stops realistically.
         self._engine_drive.control.limits(acceleration=1000)
@@ -56,6 +59,8 @@ class Buggy:
         self.y = 0
         self.direction_angle = 0
         self.crashed = False
+
+        self.button_pressed = False
 
         # initialization finished
         self.hub.light.on(Color.GREEN)
@@ -98,6 +103,8 @@ class Buggy:
             # crashed
             self.crashed = self._engine_drive.stalled()
 
+            if not len(self.remote.buttons.pressed()) == 0:
+                self.button_pressed = True
             await wait(10)
 
             #
@@ -117,13 +124,13 @@ class Buggy:
     async def drive_distance(self, speed, distance_cm):
         await self.drive_angle(speed, self.cm_to_drive_angle(distance_cm))
 
-    async def drive_xy(self, x_target, y_target, speed=500):
+    async def drive_xy(self, x_target, y_target, speed=500, interrupt_on_press=True):
         self._engine_drive.run(speed)
 
         accepted_error_cm = 20
         drive_forward_old = True
         crashed = self.crashed
-        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2 and not crashed:
+        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2 and not crashed and not (interrupt_on_press and self.button_pressed):
             # see backup computation
             steer_angle = umath.atan2(2 * self.buggy_length_cm * ((y_target - self.y) * umath.cos(self.direction_angle) - (x_target - self.x) * umath.sin(self.direction_angle)),
                                       (x_target - self.x) ** 2 + (y_target - self.y) ** 2)
@@ -182,43 +189,63 @@ async def buggy_program2():
     x_target = 0
     y_target = 0
     no_go_radius = buggy.buggy_length_cm / umath.tan(buggy.steer_angle_max_deg / 180 * umath.pi)
-    for i in range(600):
+    colors = [Color.RED, Color.ORANGE, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.VIOLET, Color.MAGENTA]
+    going_home = False
+    for i in range(100):
 
         # pick new position outside no-go zone
-        while True:
-            x_target_delta = urandom.uniform(-150, 150)
-            y_target_delta = urandom.uniform(-150, 150)
-            # check if it's in the no-go zone (turn is too sharp to get there...)
-            if (x_target_delta)**2 + (y_target_delta - no_go_radius)**2 > 1.05 * no_go_radius and \
-               (x_target_delta)**2 + (y_target_delta + no_go_radius)**2 > 1.05 * no_go_radius and \
-               -150 < x_target + x_target_delta < 150 and -150 < y_target + y_target_delta < 150:
-                break
+        if buggy.button_pressed and not going_home:
+            print(f"Return home!")
+            going_home = True
+            buggy.hub.light.animate([Color.GREEN, Color.BLACK], interval=100)
 
-        x_target += x_target_delta
-        y_target += y_target_delta
+            x_target, y_target = (0, 0)
+        else:
+            while True:
+                x_target_delta = urandom.uniform(-150, 150)
+                y_target_delta = urandom.uniform(-150, 150)
+                # check if it's in the no-go zone (turn is too sharp to get there...)
+                if (x_target_delta)**2 + (y_target_delta - no_go_radius)**2 > 1.05 * no_go_radius and \
+                (x_target_delta)**2 + (y_target_delta + no_go_radius)**2 > 1.05 * no_go_radius and \
+                -150 < x_target + x_target_delta < 150 and -150 < y_target + y_target_delta < 150:
+                    break
+
+            x_target += x_target_delta
+            y_target += y_target_delta
+
+            buggy.hub.light.animate([colors[urandom.randint(0, len(colors) - 1)] for i in range(4)], interval=urandom.randint(1, 10)*100)
+
+        # select speed
         speed = 1000  # urandom.randint(500, 1000)
-        print(f"(x_target, y_target) = ({x_target}, {y_target})   speed = {speed}")
-        x_target, y_target, crashed = await buggy.drive_xy(x_target, y_target, speed)
+        if urandom.uniform(0, 1) < 0.1:
+            speed = 500
+
+        # drive
+        print(f"({buggy.x:4.0f}, {buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}")
+        x_target, y_target, crashed = await buggy.drive_xy(x_target, y_target, speed, interrupt_on_press=not going_home)
 
         if crashed:
-            print(f"crashed!")
+            print(f"Crashed!")
             buggy.hub.light.animate([Color.RED, Color.BLACK], interval=200)
             await wait(2 * 1000)
-            buggy.hub.light.on(Color.GREEN)
 
-        if urandom.uniform(0, 1) < 0.1:
+        if going_home and not crashed:
+            print("Arrived home!")
+            await wait(2 * 1000)
+            going_home = False
+            buggy.button_pressed = False
+
+        if urandom.uniform(0, 1) < 0.1 and not buggy.button_pressed:
             wait_time = urandom.randint(1, 10)
             print(f"pause ({wait_time}s)")
             buggy.hub.light.on(Color.BLACK)
             await wait(wait_time * 1000)
-            buggy.hub.light.on(Color.GREEN)
 
-        if urandom.uniform(0, 1) < 0.01:
+        if urandom.uniform(0, 1) < 0.01 and not buggy.button_pressed:
             wait_time = urandom.randint(60, 120)
             print(f"pause ({wait_time}s)")
             buggy.hub.light.on(Color.BLACK)
             await wait(wait_time * 1000)
-            buggy.hub.light.on(Color.GREEN)
 
 
 async def buggy_program():
@@ -235,7 +262,7 @@ async def buggy_program():
 async def buggy_program_wrapper():
     print()
     print(f"Starting program")
-    await buggy_program()
+    await buggy_program2()
     await buggy.program_stop()
     print(f"Program is done")
 
