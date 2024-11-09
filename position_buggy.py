@@ -12,7 +12,7 @@ import urandom
 class Buggy:
     # buggy characteristics
     cm_for_1000_degrees = 153. / 1106. * 1000  # distance in cm when drive-engine rotates 1000 degrees
-    steer_angle_max_deg = 15  # max angle of front wheels
+    steer_angle_max_deg = 22  # max angle of front wheels
     buggy_length_cm = 15.5  # distance between front and back axel
 
     def __init__(self):
@@ -55,6 +55,7 @@ class Buggy:
         self.x = 0
         self.y = 0
         self.direction_angle = 0
+        self.crashed = False
 
         # initialization finished
         self.hub.light.on(Color.GREEN)
@@ -69,7 +70,7 @@ class Buggy:
         # We are now at the right. Reset this angle to be half the difference.
         # That puts zero in the middle.
         self._engine_steer.reset_angle(right_end - (right_end + left_end) / 2)
-        engine_steer_angle_max_deg = 0.9 * self._engine_steer.angle()
+        engine_steer_angle_max_deg = 0.8 * self._engine_steer.angle()
 
         # reset steer to neutral position
         self._engine_steer.run_target(speed=200, target_angle=0, wait=True)
@@ -94,11 +95,9 @@ class Buggy:
             self.x += distance_delta * umath.cos(self.direction_angle)
             self.y += distance_delta * umath.sin(self.direction_angle)
 
-            print(f"  (x, y)     = ({self.x:5.1f}, {self.y:5.1f})   (direction_angle = {self.direction_angle * 180 / umath.pi:3.0f})")
-            # crash detection
-            if self._engine_drive.stalled():
-                print(f"crash!")
-            print(f"  (a_x, a_y) = ({self.hub.imu.acceleration(Axis.X):5.1f}, {self.hub.imu.acceleration(Axis.Y):5.1f})")
+            # crashed
+            self.crashed = self._engine_drive.stalled()
+
             await wait(10)
 
             #
@@ -123,7 +122,8 @@ class Buggy:
 
         accepted_error_cm = 20
         drive_forward_old = True
-        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2:
+        crashed = self.crashed
+        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2 and not crashed:
             # see backup computation
             steer_angle = umath.atan2(2 * self.buggy_length_cm * ((y_target - self.y) * umath.cos(self.direction_angle) - (x_target - self.x) * umath.sin(self.direction_angle)),
                                       (x_target - self.x) ** 2 + (y_target - self.y) ** 2)
@@ -153,9 +153,12 @@ class Buggy:
                     self._engine_drive.run(-speed)
             await wait(20)
             drive_forward_old = drive_forward
+            crashed = self.crashed
 
         self._engine_drive.stop()
         self._engine_steer.stop()
+
+        return self.x, self.y, crashed
 
     async def stop(self):
         self._engine_drive.stop()
@@ -169,6 +172,8 @@ class Buggy:
     def cm_to_drive_angle(self, cm):
         return cm / self.cm_for_1000_degrees * 1000
 
+    async def steer(self, angle):
+        self._engine_steer.run_target(speed=500, target_angle=angle, wait=False)
 
 buggy = Buggy()
 
@@ -177,7 +182,7 @@ async def buggy_program2():
     x_target = 0
     y_target = 0
     no_go_radius = buggy.buggy_length_cm / umath.tan(buggy.steer_angle_max_deg / 180 * umath.pi)
-    for i in range(10):
+    for i in range(600):
 
         # pick new position outside no-go zone
         while True:
@@ -191,12 +196,29 @@ async def buggy_program2():
 
         x_target += x_target_delta
         y_target += y_target_delta
-        speed = urandom.randint(500, 1000)
+        speed = 1000  # urandom.randint(500, 1000)
         print(f"(x_target, y_target) = ({x_target}, {y_target})   speed = {speed}")
-        await buggy.drive_xy(x_target, y_target, speed)
+        x_target, y_target, crashed = await buggy.drive_xy(x_target, y_target, speed)
+
+        if crashed:
+            print(f"crashed!")
+            buggy.hub.light.animate([Color.RED, Color.BLACK], interval=200)
+            await wait(2 * 1000)
+            buggy.hub.light.on(Color.GREEN)
 
         if urandom.uniform(0, 1) < 0.1:
-            await wait(urandom.randint(1, 4)*500)
+            wait_time = urandom.randint(1, 10)
+            print(f"pause ({wait_time}s)")
+            buggy.hub.light.on(Color.BLACK)
+            await wait(wait_time * 1000)
+            buggy.hub.light.on(Color.GREEN)
+
+        if urandom.uniform(0, 1) < 0.01:
+            wait_time = urandom.randint(60, 120)
+            print(f"pause ({wait_time}s)")
+            buggy.hub.light.on(Color.BLACK)
+            await wait(wait_time * 1000)
+            buggy.hub.light.on(Color.GREEN)
 
 
 async def buggy_program():
@@ -204,13 +226,16 @@ async def buggy_program():
     # await wait(1000)
     # await buggy.drive_distance(200, 100)
     # await buggy.drive_distance(200, 100)
-    await buggy.drive_xy(x_target=200, y_target=130)    # await wait(1000)
+    # await buggy.drive_xy(x_target=200, y_target=130)    # await wait(1000)
+    print(f"{buggy.engine_steer_angle_max_deg}")
+    await buggy.steer(buggy.engine_steer_angle_max_deg)
+    await wait(5000)
 
 
 async def buggy_program_wrapper():
     print()
     print(f"Starting program")
-    await buggy_program2()
+    await buggy_program()
     await buggy.program_stop()
     print(f"Program is done")
 
