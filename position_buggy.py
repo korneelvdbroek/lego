@@ -11,70 +11,84 @@ import urandom
 
 class Buggy:
     # buggy characteristics
+    # TODO: write method which does these tests and prints output
     cm_for_1000_degrees = 153. / 1106. * 1000  # distance in cm when drive-engine rotates 1000 degrees
     steer_angle_max_deg = 22  # max angle of front wheels
     buggy_length_cm = 15.5  # distance between front and back axel
 
+    INIT = 0
+    READY = 1
+    DRIVE = 2
+    SLEEP = 3
+    CRASHED = 4
+
     def __init__(self):
+        self.mode = self.INIT
         print()
         print(f"Starting...")
 
         # Initialize the hub
         self.hub = TechnicHub()
-        self.hub.light.animate(colors=[Color.GREEN, Color.BLACK], interval=500)
 
         # Initialize the motors.
         print(f"Motors", end="")
+        self.hub.light.animate(colors=[Color.RED, Color.BLACK], interval=250)
         try:
             self._engine_drive = Motor(Port.A, Direction.COUNTERCLOCKWISE)
             self._engine_steer = Motor(Port.C)
         except Exception as e:
             # flash magenta: issue with motors
-            self.hub.light.animate(colors=[Color.RED, Color.BLACK], interval=250)
             wait(2 * 1000)
             raise e
         print(f" initialized...")
 
         # Connect to the remote.
         print(f"Remote control", end="")
+        self.hub.light.animate(colors=[Color.ORANGE, Color.BLACK], interval=250)
         try:
             self.remote = Remote()
         except Exception as e:
             # flash red: remote is missing
-            self.hub.light.animate(colors=[Color.ORANGE, Color.BLACK], interval=250)
             wait(5 * 1000)
             raise e
         print(f" initialized...")
 
+        # Calibrate steering
         print(f"Steering", end="")
+        self.hub.light.animate(colors=[Color.YELLOW, Color.BLACK], interval=250)
         self.engine_steer_angle_max_deg = self.calibrate_steering()
         print(f" initialized...")
 
         # Lower the acceleration so the car starts and stops realistically.
         self._engine_drive.control.limits(acceleration=1000)
 
-        # position-data
-        self._program_stop = False
+        # buggy state data
         self.x = 0
         self.y = 0
         self.direction_angle = 0
-        self.crashed = False
 
+        # buggy state
+        self._stop_tracking_loop = False
+        self._stop_event_loop = False
+        self._stop_action_loop = False
+
+        # remote button data
         self.button_pressed = False
 
         # initialization finished
+        self.mode = self.READY
         self.hub.light.on(Color.GREEN)
 
     def calibrate_steering(self):
         # Find the steering endpoint on the left and right.
         # The middle is in between.
-        left_end = self._engine_steer.run_until_stalled(-500, then=Stop.BRAKE)
+        left_end = self._engine_steer.run_until_stalled(-500, then=Stop.HOLD)
         wait(500)
-        right_end = self._engine_steer.run_until_stalled(500, then=Stop.BRAKE)
+        right_end = self._engine_steer.run_until_stalled(500, then=Stop.HOLD)
 
         # We are now at the right. Reset this angle to be half the difference.
         # That puts zero in the middle.
-        self._engine_steer.reset_angle(right_end - (right_end + left_end) / 2)
+        self._engine_steer.reset_angle(float(right_end) - (right_end + left_end) / 2)
         engine_steer_angle_max_deg = 0.8 * self._engine_steer.angle()
 
         # reset steer to neutral position
@@ -82,60 +96,53 @@ class Buggy:
 
         return engine_steer_angle_max_deg
 
-    async def track_task(self):
-        self._program_stop = False
+    async def tracking_loop(self):
+        self._stop_tracking_loop = False
         drive_angle_old = self._engine_drive.angle()
-        while not self._program_stop:
+        while not self._stop_tracking_loop:
             # drive angle
             drive_angle = self._engine_drive.angle()
             drive_angle_delta = drive_angle - drive_angle_old
 
-            # distance
+            # track: distance, angle, position
             distance_delta = self.drive_angle_to_cm(drive_angle_delta)
-
-            # angle
             self.direction_angle = self.hub.imu.heading() / 180 * umath.pi
-
-            # position
             self.x += distance_delta * umath.cos(self.direction_angle)
             self.y += distance_delta * umath.sin(self.direction_angle)
 
-            # crashed
-            self.crashed = self._engine_drive.stalled()
-
-            if not len(self.remote.buttons.pressed()) == 0:
-                self.button_pressed = True
-            await wait(10)
+            if self._engine_drive.stalled():
+                self.mode = self.CRASHED
 
             #
+            await wait(10)
             drive_angle_old = drive_angle
 
-    async def drive(self, speed, duration=1):
-        self._engine_drive.run(speed)
-        await wait(duration * 1000.)
-
-    async def drive_angle(self, speed, angle):
-        drive_angle_start = self._engine_drive.angle()
-        self._engine_drive.run(speed)
-        while self._engine_drive.angle() < drive_angle_start + angle and not self._engine_drive.stalled():
-            await wait(20)
-        self._engine_drive.stop()
-
-    async def drive_distance(self, speed, distance_cm):
-        await self.drive_angle(speed, self.cm_to_drive_angle(distance_cm))
-
-    async def drive_xy(self, x_target, y_target, speed=500, interrupt_on_press=True):
+    async def drive_xy(self, x_target, y_target, speed=500):
+        self._stop_action_loop = False
+        self.mode = self.DRIVE
         self._engine_drive.run(speed)
 
         accepted_error_cm = 20
         drive_forward_old = True
-        crashed = self.crashed
-        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2 and not crashed and not (interrupt_on_press and self.button_pressed):
+        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2 and not self.mode == self.CRASHED and not self._stop_action_loop:
             # see backup computation
             steer_angle = umath.atan2(2 * self.buggy_length_cm * ((y_target - self.y) * umath.cos(self.direction_angle) - (x_target - self.x) * umath.sin(self.direction_angle)),
                                       (x_target - self.x) ** 2 + (y_target - self.y) ** 2)
 
             drive_forward = (x_target - self.x) * umath.cos(self.direction_angle) + (y_target - self.y) * umath.sin(self.direction_angle) >= 0
+
+            steer_angle_deg = 180 / umath.pi * steer_angle
+
+            steer_angle_deg = min(max(steer_angle_deg, -self.steer_angle_max_deg), self.steer_angle_max_deg)
+            engine_steer_angle_deg = steer_angle_deg / self.steer_angle_max_deg * self.engine_steer_angle_max_deg
+
+            # send instructions to engine
+            self._engine_steer.run_target(speed=500, target_angle=engine_steer_angle_deg, wait=False)
+            if drive_forward != drive_forward_old:
+                if drive_forward:
+                    self._engine_drive.run(speed)
+                else:
+                    self._engine_drive.run(-speed)
 
             # print(f"steering:")
             # print(f"  drive_forward = {drive_forward}")
@@ -145,33 +152,27 @@ class Buggy:
             # print(f"  (x_target - self.x) = {(x_target - self.x)}")
             # print(f"  sin(direction_angle) = {umath.sin(self.direction_angle)}")
             # print(f"  {steer_angle} = atan({2 * self.buggy_length_cm * ((y_target - self.y) * umath.cos(self.direction_angle) - (x_target - self.x) * umath.sin(self.direction_angle))} / {(x_target - self.x) ** 2 + (y_target - self.y) ** 2})")
-
-            steer_angle_deg = 180 / umath.pi * steer_angle
-
-            steer_angle_deg = min(max(steer_angle_deg, -self.steer_angle_max_deg), self.steer_angle_max_deg)
-            engine_steer_angle_deg = steer_angle_deg / self.steer_angle_max_deg * self.engine_steer_angle_max_deg
             # print(f"  steer_angle_deg = {steer_angle_deg:3.0f} (engine_steer_angle_deg = {engine_steer_angle_deg:3.0f})")
 
-            self._engine_steer.run_target(speed=500, target_angle=engine_steer_angle_deg, wait=False)
-            if drive_forward != drive_forward_old:
-                if drive_forward:
-                    self._engine_drive.run(speed)
-                else:
-                    self._engine_drive.run(-speed)
+            # increment
             await wait(20)
             drive_forward_old = drive_forward
-            crashed = self.crashed
 
         self._engine_drive.stop()
         self._engine_steer.stop()
+        self.mode = self.READY
 
-        return self.x, self.y, crashed
+        return
 
-    async def stop(self):
-        self._engine_drive.stop()
+    async def wait(self, time_ms):
+        self._stop_action_loop = False
+        self.mode = self.SLEEP
 
-    async def program_stop(self):
-        self._program_stop = True
+        timer = StopWatch()
+        while timer.time() < time_ms and not self._stop_action_loop:
+            await wait(20)
+
+        self.mode = self.READY
 
     def drive_angle_to_cm(self, angle):
         return angle / 1000 * self.cm_for_1000_degrees
@@ -182,93 +183,110 @@ class Buggy:
     async def steer(self, angle):
         self._engine_steer.run_target(speed=500, target_angle=angle, wait=False)
 
-buggy = Buggy()
+    def run(self, event_loop, external_state):
+        run_task(self._run(event_loop, external_state))
+
+    async def _run(self, event_loop, external_state):
+        await multitask(self.tracking_loop(),
+                        self._event_loop_wrapper(event_loop, external_state))
+
+    async def _event_loop_wrapper(self, event_loop, external_state):
+        print()
+        print(f"Starting program")
+
+        while not self._stop_event_loop:
+            external_state = await event_loop(self, self.remote.buttons.pressed(), external_state)
+            await wait(20)
+
+        # stop all tasks
+        self._stop_action_loop = True
+        self._stop_tracking_loop = True
+        self._stop_event_loop = True
+        print(f"Program is done")
+
+    async def stop(self):
+        """Stop the current action"""
+        self._stop_action_loop = True
+
+    async def exit(self):
+        """Exit the event loop"""
+        self._stop_event_loop = True
 
 
-async def buggy_program2():
-    x_target = 0
-    y_target = 0
-    no_go_radius = buggy.buggy_length_cm / umath.tan(buggy.steer_angle_max_deg / 180 * umath.pi)
-    colors = [Color.RED, Color.ORANGE, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.VIOLET, Color.MAGENTA]
-    going_home = False
-    for i in range(100):
+class BuggyState:
+    NOP = 0
+    GO_HOME = 3
 
-        # pick new position outside no-go zone
-        if buggy.button_pressed and not going_home:
+
+async def buggy_events(buggy, buttons_pressed, state):
+    # determine next action
+    if buggy.mode == buggy.READY:
+        if state == BuggyState.GO_HOME:
             print(f"Return home!")
-            going_home = True
-            buggy.hub.light.animate([Color.GREEN, Color.BLACK], interval=100)
-
             x_target, y_target = (0, 0)
+            buggy.hub.light.animate([Color.GREEN, Color.BLACK], interval=100)
+            state = BuggyState.NOP
+
+            # drive
+            speed = 1000
+            await buggy.drive_xy(x_target, y_target, speed)
+
+        elif urandom.uniform(0, 1) < 0.1:
+            wait_time = urandom.randint(1, 10)
+            print(f"Pause ({wait_time}s)")
+            buggy.hub.light.on(Color.BLACK)
+            await buggy.wait(wait_time * 1000)
+
+        elif urandom.uniform(0, 1) < 0.01 and not buggy.button_pressed:
+            wait_time = urandom.randint(60, 120)
+            print(f"Long pause ({wait_time}s)")
+            buggy.hub.light.on(Color.BLACK)
+            await buggy.wait(wait_time * 1000)
+
         else:
+            # pick new position outside no-go zone
+            no_go_radius = buggy.buggy_length_cm / umath.tan(buggy.steer_angle_max_deg / 180 * umath.pi)
             while True:
                 x_target_delta = urandom.uniform(-150, 150)
                 y_target_delta = urandom.uniform(-150, 150)
+
                 # check if it's in the no-go zone (turn is too sharp to get there...)
-                if (x_target_delta)**2 + (y_target_delta - no_go_radius)**2 > 1.05 * no_go_radius and \
-                (x_target_delta)**2 + (y_target_delta + no_go_radius)**2 > 1.05 * no_go_radius and \
-                -150 < x_target + x_target_delta < 150 and -150 < y_target + y_target_delta < 150:
+                # TODO: correct formula for non-zero self.direction_angle!
+                if x_target_delta ** 2 + (y_target_delta - no_go_radius) ** 2 > 1.05 * no_go_radius and \
+                    x_target_delta ** 2 + (y_target_delta + no_go_radius) ** 2 > 1.05 * no_go_radius and \
+                    -150 < buggy.x + x_target_delta < 150 and -150 < buggy.y + y_target_delta < 150:
                     break
 
-            x_target += x_target_delta
-            y_target += y_target_delta
+            x_target = buggy.x + x_target_delta
+            y_target = buggy.y + y_target_delta
 
+            colors = [Color.RED, Color.ORANGE, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.VIOLET,
+                      Color.MAGENTA]
             buggy.hub.light.animate([colors[urandom.randint(0, len(colors) - 1)] for i in range(4)], interval=urandom.randint(1, 10)*100)
 
-        # select speed
-        speed = 1000  # urandom.randint(500, 1000)
-        if urandom.uniform(0, 1) < 0.1:
-            speed = 500
+            # select speed
+            speed = 1000  # urandom.randint(500, 1000)
+            if urandom.uniform(0, 1) < 0.1:
+                speed = 500
 
-        # drive
-        print(f"({buggy.x:4.0f}, {buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}")
-        x_target, y_target, crashed = await buggy.drive_xy(x_target, y_target, speed, interrupt_on_press=not going_home)
+            # drive
+            print(f"Driving ({buggy.x:4.0f}, {buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}")
+            await buggy.drive_xy(x_target, y_target, speed)
 
-        if crashed:
-            print(f"Crashed!")
-            buggy.hub.light.animate([Color.RED, Color.BLACK], interval=200)
-            await wait(2 * 1000)
+    elif buggy.mode == buggy.CRASHED:
+        print(f"Crashed => recovering")
+        buggy.hub.light.animate([Color.RED, Color.BLACK], interval=200)
+        await buggy.wait(2 * 1000)
 
-        if going_home and not crashed:
-            print("Arrived home!")
-            await wait(2 * 1000)
-            going_home = False
-            buggy.button_pressed = False
+    # change state
+    if state != BuggyState.GO_HOME and len(buttons_pressed) != 0:
+        print(f"Key pressed => going home")
+        state = BuggyState.GO_HOME
+        await buggy.stop()
 
-        if urandom.uniform(0, 1) < 0.1 and not buggy.button_pressed:
-            wait_time = urandom.randint(1, 10)
-            print(f"pause ({wait_time}s)")
-            buggy.hub.light.on(Color.BLACK)
-            await wait(wait_time * 1000)
-
-        if urandom.uniform(0, 1) < 0.01 and not buggy.button_pressed:
-            wait_time = urandom.randint(60, 120)
-            print(f"pause ({wait_time}s)")
-            buggy.hub.light.on(Color.BLACK)
-            await wait(wait_time * 1000)
+    return state
 
 
-async def buggy_program():
-    # await buggy.drive_angle(500, 1000)
-    # await wait(1000)
-    # await buggy.drive_distance(200, 100)
-    # await buggy.drive_distance(200, 100)
-    # await buggy.drive_xy(x_target=200, y_target=130)    # await wait(1000)
-    print(f"{buggy.engine_steer_angle_max_deg}")
-    await buggy.steer(buggy.engine_steer_angle_max_deg)
-    await wait(5000)
-
-
-async def buggy_program_wrapper():
-    print()
-    print(f"Starting program")
-    await buggy_program2()
-    await buggy.program_stop()
-    print(f"Program is done")
-
-
-async def main():
-    await multitask(buggy.track_task(), buggy_program_wrapper())
-
-
-run_task(main())
+buggy = Buggy()
+buggy_state = BuggyState.NOP
+buggy.run(buggy_events, buggy_state)
