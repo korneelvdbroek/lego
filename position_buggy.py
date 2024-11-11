@@ -44,7 +44,7 @@ class Buggy:
 
         # Connect to the remote.
         print(f"Remote control", end="")
-        self.hub.light.animate(colors=[Color.ORANGE, Color.BLACK], interval=250)
+        self.hub.light.animate(colors=[Color.BLUE, Color.BLACK], interval=250)
         try:
             self.remote = Remote()
         except Exception as e:
@@ -55,7 +55,7 @@ class Buggy:
 
         # Calibrate steering
         print(f"Steering", end="")
-        self.hub.light.animate(colors=[Color.YELLOW, Color.BLACK], interval=250)
+        self.hub.light.animate(colors=[Color.CYAN, Color.BLACK], interval=250)
         self.engine_steer_angle_max_deg = self.calibrate_steering()
         print(f" initialized...")
 
@@ -68,9 +68,10 @@ class Buggy:
         self.direction_angle = 0
 
         # buggy state
-        self._stop_tracking_loop = False
-        self._stop_event_loop = False
-        self._stop_action_loop = False
+        self._task = None
+        self._stop_loops = False
+        self._stop_loops = False
+        self._stop_action = False
 
         # remote button data
         self.button_pressed = False
@@ -97,9 +98,9 @@ class Buggy:
         return engine_steer_angle_max_deg
 
     async def tracking_loop(self):
-        self._stop_tracking_loop = False
+        self._stop_loops = False
         drive_angle_old = self._engine_drive.angle()
-        while not self._stop_tracking_loop:
+        while not self._stop_loops:
             # drive angle
             drive_angle = self._engine_drive.angle()
             drive_angle_delta = drive_angle - drive_angle_old
@@ -118,18 +119,22 @@ class Buggy:
             drive_angle_old = drive_angle
 
     async def drive_xy(self, x_target, y_target, speed=500):
-        self._stop_action_loop = False
+        self._stop_action = False
         self.mode = self.DRIVE
         self._engine_drive.run(speed)
 
         accepted_error_cm = 20
         drive_forward_old = True
-        while (x_target - self.x) ** 2 + (y_target - self.y) ** 2 > accepted_error_cm**2 and not self.mode == self.CRASHED and not self._stop_action_loop:
+        while (x_target - self.x) ** 2 + (
+                y_target - self.y) ** 2 > accepted_error_cm ** 2 and not self.mode == self.CRASHED and not self._stop_action:
             # see backup computation
-            steer_angle = umath.atan2(2 * self.buggy_length_cm * ((y_target - self.y) * umath.cos(self.direction_angle) - (x_target - self.x) * umath.sin(self.direction_angle)),
+            steer_angle = umath.atan2(2 * self.buggy_length_cm * (
+                        (y_target - self.y) * umath.cos(self.direction_angle) - (x_target - self.x) * umath.sin(
+                    self.direction_angle)),
                                       (x_target - self.x) ** 2 + (y_target - self.y) ** 2)
 
-            drive_forward = (x_target - self.x) * umath.cos(self.direction_angle) + (y_target - self.y) * umath.sin(self.direction_angle) >= 0
+            drive_forward = (x_target - self.x) * umath.cos(self.direction_angle) + (y_target - self.y) * umath.sin(
+                self.direction_angle) >= 0
 
             steer_angle_deg = 180 / umath.pi * steer_angle
 
@@ -160,16 +165,19 @@ class Buggy:
 
         self._engine_drive.stop()
         self._engine_steer.stop()
-        self.mode = self.READY
+
+        # update mode
+        if self.mode != self.CRASHED:
+            self.mode = self.READY
 
         return
 
     async def wait(self, time_ms):
-        self._stop_action_loop = False
+        self._stop_action = False
         self.mode = self.SLEEP
 
         timer = StopWatch()
-        while timer.time() < time_ms and not self._stop_action_loop:
+        while timer.time() < time_ms and not self._stop_action:
             await wait(20)
 
         self.mode = self.READY
@@ -188,34 +196,49 @@ class Buggy:
 
     async def _run(self, event_loop, external_state):
         await multitask(self.tracking_loop(),
-                        self._event_loop_wrapper(event_loop, external_state))
+                        self._event_loop_wrapper(event_loop, external_state),
+                        self._action_loop())
 
     async def _event_loop_wrapper(self, event_loop, external_state):
         print()
         print(f"Starting program")
 
-        while not self._stop_event_loop:
+        while not self._stop_loops:
             external_state = await event_loop(self, self.remote.buttons.pressed(), external_state)
             await wait(20)
 
         # stop all tasks
-        self._stop_action_loop = True
-        self._stop_tracking_loop = True
-        self._stop_event_loop = True
+        self._stop_action = True
+        self._stop_loops = True
         print(f"Program is done")
 
-    async def stop(self):
-        """Stop the current action"""
-        self._stop_action_loop = True
+    async def _action_loop(self):
+        while not self._stop_loops:
+            if self._task is not None:
+                print(f"running task = {self._task}")
+                await self._task
+                self._task = None
+            await wait(20)
 
-    async def exit(self):
+    def create_task(self, task):
+        if self._task is None:
+            self._task = task
+        else:
+            print(f"Waiting for previous task to finish...")
+
+    def stop(self):
+        """Stop the current action"""
+        self._stop_action = True
+
+    def exit(self):
         """Exit the event loop"""
-        self._stop_event_loop = True
+        self._stop_loops = True
 
 
 class BuggyState:
     NOP = 0
     GO_HOME = 3
+    GOING_HOME = 4
 
 
 async def buggy_events(buggy, buttons_pressed, state):
@@ -225,23 +248,28 @@ async def buggy_events(buggy, buttons_pressed, state):
             print(f"Return home!")
             x_target, y_target = (0, 0)
             buggy.hub.light.animate([Color.GREEN, Color.BLACK], interval=100)
-            state = BuggyState.NOP
+            state = BuggyState.GOING_HOME
 
             # drive
             speed = 1000
-            await buggy.drive_xy(x_target, y_target, speed)
+            buggy.create_task(buggy.drive_xy(x_target, y_target, speed))
+
+        elif state == BuggyState.GOING_HOME:
+            wait_time = 2
+            buggy.create_task(buggy.wait(wait_time * 1000))
+            state = BuggyState.NOP
 
         elif urandom.uniform(0, 1) < 0.1:
             wait_time = urandom.randint(1, 10)
             print(f"Pause ({wait_time}s)")
             buggy.hub.light.on(Color.BLACK)
-            await buggy.wait(wait_time * 1000)
+            buggy.create_task(buggy.wait(wait_time * 1000))
 
         elif urandom.uniform(0, 1) < 0.01 and not buggy.button_pressed:
             wait_time = urandom.randint(60, 120)
             print(f"Long pause ({wait_time}s)")
             buggy.hub.light.on(Color.BLACK)
-            await buggy.wait(wait_time * 1000)
+            buggy.create_task(buggy.wait(wait_time * 1000))
 
         else:
             # pick new position outside no-go zone
@@ -252,9 +280,13 @@ async def buggy_events(buggy, buttons_pressed, state):
 
                 # check if it's in the no-go zone (turn is too sharp to get there...)
                 # TODO: correct formula for non-zero self.direction_angle!
-                if x_target_delta ** 2 + (y_target_delta - no_go_radius) ** 2 > 1.05 * no_go_radius and \
-                    x_target_delta ** 2 + (y_target_delta + no_go_radius) ** 2 > 1.05 * no_go_radius and \
-                    -150 < buggy.x + x_target_delta < 150 and -150 < buggy.y + y_target_delta < 150:
+                if (x_target_delta + no_go_radius * umath.sin(buggy.direction_angle)) ** 2 + (
+                        y_target_delta - no_go_radius * umath.cos(
+                        buggy.direction_angle)) ** 2 > 1.05 * no_go_radius ** 2 and \
+                        (x_target_delta - no_go_radius * umath.sin(buggy.direction_angle)) ** 2 + (
+                        y_target_delta + no_go_radius * umath.cos(
+                    buggy.direction_angle)) ** 2 > 1.05 * no_go_radius ** 2 and \
+                        -150 < buggy.x + x_target_delta < 150 and -150 < buggy.y + y_target_delta < 150:
                     break
 
             x_target = buggy.x + x_target_delta
@@ -262,7 +294,8 @@ async def buggy_events(buggy, buttons_pressed, state):
 
             colors = [Color.RED, Color.ORANGE, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.VIOLET,
                       Color.MAGENTA]
-            buggy.hub.light.animate([colors[urandom.randint(0, len(colors) - 1)] for i in range(4)], interval=urandom.randint(1, 10)*100)
+            buggy.hub.light.animate([colors[urandom.randint(0, len(colors) - 1)] for i in range(4)],
+                                    interval=urandom.randint(1, 10) * 100)
 
             # select speed
             speed = 1000  # urandom.randint(500, 1000)
@@ -271,18 +304,18 @@ async def buggy_events(buggy, buttons_pressed, state):
 
             # drive
             print(f"Driving ({buggy.x:4.0f}, {buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}")
-            await buggy.drive_xy(x_target, y_target, speed)
+            buggy.create_task(buggy.drive_xy(x_target, y_target, speed))
 
     elif buggy.mode == buggy.CRASHED:
         print(f"Crashed => recovering")
         buggy.hub.light.animate([Color.RED, Color.BLACK], interval=200)
-        await buggy.wait(2 * 1000)
+        buggy.create_task(buggy.wait(2 * 1000))
 
     # change state
-    if state != BuggyState.GO_HOME and len(buttons_pressed) != 0:
+    if state != BuggyState.GO_HOME and state != BuggyState.GOING_HOME and len(buttons_pressed) != 0:
         print(f"Key pressed => going home")
         state = BuggyState.GO_HOME
-        await buggy.stop()
+        buggy.stop()
 
     return state
 
