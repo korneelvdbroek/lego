@@ -68,7 +68,7 @@ class Buggy:
         self.direction_angle = 0
 
         # buggy state
-        self._task = None
+        self._action = None
         self._stop_loops = False
         self._stop_loops = False
         self._stop_action = False
@@ -214,19 +214,18 @@ class Buggy:
 
     async def _action_loop(self):
         while not self._stop_loops:
-            if self._task is not None:
-                print(f"running task = {self._task}")
-                await self._task
-                self._task = None
+            if self._action is not None:
+                await self._action
+                self._action = None
             await wait(20)
 
-    def create_task(self, task):
-        if self._task is None:
-            self._task = task
+    def create_action(self, action):
+        if self._action is None:
+            self._action = action
         else:
             print(f"Waiting for previous task to finish...")
 
-    def stop(self):
+    def stop_action(self):
         """Stop the current action"""
         self._stop_action = True
 
@@ -245,31 +244,32 @@ async def buggy_events(buggy, buttons_pressed, state):
     # determine next action
     if buggy.mode == buggy.READY:
         if state == BuggyState.GO_HOME:
-            print(f"Return home!")
+            print(f"Returning home!")
+            # TODO: what if this is in no-go zone?
             x_target, y_target = (0, 0)
             buggy.hub.light.animate([Color.GREEN, Color.BLACK], interval=100)
             state = BuggyState.GOING_HOME
 
             # drive
             speed = 1000
-            buggy.create_task(buggy.drive_xy(x_target, y_target, speed))
+            buggy.create_action(buggy.drive_xy(x_target, y_target, speed))
 
         elif state == BuggyState.GOING_HOME:
             wait_time = 2
-            buggy.create_task(buggy.wait(wait_time * 1000))
+            buggy.create_action(buggy.wait(wait_time * 1000))
             state = BuggyState.NOP
 
         elif urandom.uniform(0, 1) < 0.1:
             wait_time = urandom.randint(1, 10)
             print(f"Pause ({wait_time}s)")
             buggy.hub.light.on(Color.BLACK)
-            buggy.create_task(buggy.wait(wait_time * 1000))
+            buggy.create_action(buggy.wait(wait_time * 1000))
 
         elif urandom.uniform(0, 1) < 0.01 and not buggy.button_pressed:
             wait_time = urandom.randint(60, 120)
             print(f"Long pause ({wait_time}s)")
             buggy.hub.light.on(Color.BLACK)
-            buggy.create_task(buggy.wait(wait_time * 1000))
+            buggy.create_action(buggy.wait(wait_time * 1000))
 
         else:
             # pick new position outside no-go zone
@@ -279,7 +279,6 @@ async def buggy_events(buggy, buttons_pressed, state):
                 y_target_delta = urandom.uniform(-150, 150)
 
                 # check if it's in the no-go zone (turn is too sharp to get there...)
-                # TODO: correct formula for non-zero self.direction_angle!
                 if (x_target_delta + no_go_radius * umath.sin(buggy.direction_angle)) ** 2 + (
                         y_target_delta - no_go_radius * umath.cos(
                         buggy.direction_angle)) ** 2 > 1.05 * no_go_radius ** 2 and \
@@ -304,18 +303,18 @@ async def buggy_events(buggy, buttons_pressed, state):
 
             # drive
             print(f"Driving ({buggy.x:4.0f}, {buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}")
-            buggy.create_task(buggy.drive_xy(x_target, y_target, speed))
+            buggy.create_action(buggy.drive_xy(x_target, y_target, speed))
 
     elif buggy.mode == buggy.CRASHED:
         print(f"Crashed => recovering")
         buggy.hub.light.animate([Color.RED, Color.BLACK], interval=200)
-        buggy.create_task(buggy.wait(2 * 1000))
+        buggy.create_action(buggy.wait(2 * 1000))
 
     # change state
     if state != BuggyState.GO_HOME and state != BuggyState.GOING_HOME and len(buttons_pressed) != 0:
         print(f"Key pressed => going home")
         state = BuggyState.GO_HOME
-        buggy.stop()
+        buggy.stop_action()
 
     return state
 
