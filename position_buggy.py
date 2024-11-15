@@ -76,6 +76,8 @@ class Buggy:
         # remote button data
         self.button_pressed = False
 
+        self.hub.imu.reset_heading(0)
+
         # initialization finished
         self.mode = self.READY
         self.hub.light.on(Color.GREEN)
@@ -115,7 +117,7 @@ class Buggy:
                 self.mode = self.CRASHED
 
             #
-            await wait(10)
+            await wait(20)
             drive_angle_old = drive_angle
 
     async def drive_xy(self, x_target, y_target, speed=500):
@@ -159,7 +161,7 @@ class Buggy:
             # print(f"  steer_angle_deg = {steer_angle_deg:3.0f} (engine_steer_angle_deg = {engine_steer_angle_deg:3.0f})")
 
             # increment
-            await wait(20)
+            await wait(40)
             drive_forward_old = drive_forward
 
         self._engine_drive.stop()
@@ -195,9 +197,9 @@ class Buggy:
         no_go_radius = self.buggy_length_cm / umath.tan(self.steer_angle_max_deg / 180 * umath.pi)
 
         inside_no_go_left = (delta_x + no_go_radius * umath.sin(self.direction_angle)) ** 2 + (
-                            delta_y - no_go_radius * umath.cos(self.direction_angle)) ** 2 < 1.05 * no_go_radius ** 2
+                            delta_y - no_go_radius * umath.cos(self.direction_angle)) ** 2 < 1.5 * no_go_radius ** 2
         inside_no_go_right = (delta_x - no_go_radius * umath.sin(self.direction_angle)) ** 2 + (
-                            delta_y + no_go_radius * umath.cos(self.direction_angle)) ** 2 < 1.05 * no_go_radius ** 2
+                            delta_y + no_go_radius * umath.cos(self.direction_angle)) ** 2 < 1.5 * no_go_radius ** 2
         return inside_no_go_left or inside_no_go_right
 
     async def wait(self, time_ms):
@@ -206,7 +208,7 @@ class Buggy:
 
         timer = StopWatch()
         while timer.time() < time_ms and not self._stop_action:
-            await wait(20)
+            await wait(40)
 
         self.mode = self.READY
 
@@ -233,7 +235,7 @@ class Buggy:
 
         while not self._stop_loops:
             await event_loop(self.remote.buttons.pressed())
-            await wait(20)
+            await wait(40)
 
         # stop all tasks
         self._stop_action = True
@@ -245,13 +247,17 @@ class Buggy:
             if self._action is not None:
                 await self._action
                 self._action = None
-            await wait(20)
+            else:
+                await wait(50)
+        print(f"DEBUG: Exiting action loop...")
 
     def create_action(self, action):
         if self._action is None:
             self._action = action
+            return True
         else:
             print(f"Waiting for previous task to finish...")
+            return False
 
     def stop_action(self):
         """Stop the current action"""
@@ -269,7 +275,6 @@ class Floorplan:
 
         # convert to 2D array (we store as tuple of tuples, to enforce immutability)
         self.plan = tuple(tuple(row) for row in floorplan_str.split("\n"))[1:-1]
-        self.plan = tuple(reversed(self.plan))
 
         self.height = len(self.plan)  # y-direction
         self.width = len(self.plan[0])  # x-direction
@@ -294,7 +299,7 @@ class Floorplan:
 
     @staticmethod
     def _str(plan):
-        return '\n'.join([''.join(row) for row in reversed(plan)])
+        return '\n'.join([''.join(row) for row in plan])
 
     def __call__(self, x, y):
         pos_x, pos_y = self.coord2pos(x, y)
@@ -304,7 +309,7 @@ class Floorplan:
         pos_x += self.offset_x
         pos_y += self.offset_y
         if 0 <= pos_x < self.width and 0 <= pos_y < self.height:
-            char = self.plan[pos_x][pos_y]
+            char = self.plan[pos_y][pos_x]
         else:
             char = 'X'
 
@@ -332,7 +337,7 @@ class Floorplan:
         along the circle with center (xc, yc) and radius R
         is free of obstructions"""
         R = umath.sqrt((x0 - xc)**2 + (y0 - yc)**2)
-        assert umath.sqrt((x1 - xc)**2 + (y1 - yc)**2) - R < 1e-2, f"Should be equal: {umath.sqrt((x1 - xc)**2 + (y1 - yc)**2)} = {R}"
+        assert (umath.sqrt((x1 - xc)**2 + (y1 - yc)**2) - R) / R < 1e-4, f"Should be equal: {umath.sqrt((x1 - xc)**2 + (y1 - yc)**2)} = {R}"
 
         alpha_start = umath.atan2(y0 - yc, x0 - xc)  # -180 -> 180 deg
         alpha_end = umath.atan2(y1 - yc, x1 - xc)  # -180 -> 180 deg
@@ -406,24 +411,26 @@ class BuggyControl:
     NOP = 0
     GO_HOME = 3
     GOING_HOME = 4
+    CRASH_RECOVERY = 5
 
     def __init__(self):
         self.buggy = Buggy()
 
-#        y+
-#        y+
+#        y-
+#        y-
 #  x- x- -  x+ x+ >
-#        y-
-#        y-
+#        y+
+#        y+
 
         floorplan_str = """
-XXXXXXXXXXXX
-X.....XXX..X
-X.....XXX..X
-X..-.......X
-X.....XXX..X
-X.....XXX..X
-XXXXXXXXXXXX
+XXXXXXXXXXXXXXXXXXXX
+XX........XXXXXXXXXX
+X...XXXX......XXXXXX
+X..XXXXX...........X
+X..XXXXX..-........X
+X..XXXXX......XXX..X
+XX........XXXXXXXXXX
+XXXXXXXXXXXXXXXXXXXX
 """
 
         self.floorplan = Floorplan(floorplan_str, 50)
@@ -435,19 +442,47 @@ XXXXXXXXXXXX
             if self.state == BuggyControl.GO_HOME:
                 print(f"Returning home!")
                 # TODO: what if this is in no-go zone?
+                # TODO: what if this goes through X's
                 x_target, y_target = (0, 0)
                 self.buggy.hub.light.animate([Color.GREEN, Color.BLACK], interval=100)
-                self.state = BuggyControl.GOING_HOME
 
                 # drive
                 speed = 1000
-                print(f"Driving ({self.buggy.x:4.0f}, {self.buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}")
-                self.buggy.create_action(self.buggy.drive_xy(x_target, y_target, speed))
+                print(f"Driving ({self.buggy.x:4.0f}, {self.buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}  heading = {self.buggy.direction_angle * 180 / umath.pi}")
+                if self.buggy.create_action(self.buggy.drive_xy(x_target, y_target, speed)):
+                    self.state = BuggyControl.GOING_HOME
 
             elif self.state == BuggyControl.GOING_HOME:
                 wait_time = 2
-                self.buggy.create_action(self.buggy.wait(wait_time * 1000))
+                if self.buggy.create_action(self.buggy.wait(wait_time * 1000)):
+                    self.state = BuggyControl.NOP
+
+            elif self.state == BuggyControl.CRASH_RECOVERY:
+                print(f"Recovering from crash")
                 self.state = BuggyControl.NOP
+
+                # pick new position outside no-go zone
+                counter = 0
+                while True:
+                    x_target_delta = urandom.uniform(-150, 150)
+                    y_target_delta = urandom.uniform(-150, 150)
+
+                    x_target = self.buggy.x + x_target_delta
+                    y_target = self.buggy.y + y_target_delta
+
+                    xc, yc = self.buggy.circle_center(self.buggy.x, self.buggy.y, x_target, y_target)
+
+                    # check if it's in the no-go zone (turn is too sharp to get there...)
+                    if (not self.buggy.is_no_go(x_target_delta, y_target_delta)) and \
+                            self.floorplan.is_circle_path_free(self.buggy.x, self.buggy.y, x_target, y_target, xc, yc):
+                        break
+
+                    counter += 1
+
+                # drive
+                speed = 1000
+                print(f"Driving ({self.buggy.x:4.0f}, {self.buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}  heading = {self.buggy.direction_angle * 180 / umath.pi}")
+                self.buggy.create_action(self.buggy.drive_xy(x_target, y_target, speed))
 
             elif urandom.uniform(0, 1) < 0.01:
                 wait_time = urandom.randint(1, 10)
@@ -468,23 +503,18 @@ XXXXXXXXXXXX
                     x_target_delta = urandom.uniform(-150, 150)
                     y_target_delta = urandom.uniform(-150, 150)
 
-                    x_target_new = self.buggy.x + x_target_delta
-                    y_target_new = self.buggy.y + y_target_delta
+                    x_target = self.buggy.x + x_target_delta
+                    y_target = self.buggy.y + y_target_delta
 
-                    xc, yc = self.buggy.circle_center(self.buggy.x, self.buggy.y, x_target_new, y_target_new)
+                    xc, yc = self.buggy.circle_center(self.buggy.x, self.buggy.y, x_target, y_target)
 
                     # check if it's in the no-go zone (turn is too sharp to get there...)
-                    if not self.buggy.is_no_go(x_target_delta, y_target_delta) and \
-                            ((self.buggy.is_forward(x_target_delta, y_target_delta) and counter < 10) or (counter >= 10)) and \
-                            self.floorplan.is_circle_path_free(self.buggy.x, self.buggy.y, x_target_new, y_target_new, xc, yc):
+                    if (not self.buggy.is_no_go(x_target_delta, y_target_delta)) and \
+                            ((self.buggy.is_forward(x_target_delta, y_target_delta) and counter < 50) or (counter >= 50)) and \
+                            self.floorplan.is_circle_path_free(self.buggy.x, self.buggy.y, x_target, y_target, xc, yc):
                         break
 
                     counter += 1
-
-                x_target = x_target_new
-                y_target = y_target_new
-
-                self.floorplan.print_circle_path(self.buggy.x, self.buggy.y, x_target_new, y_target_new, xc, yc)
 
                 colors = [Color.RED, Color.ORANGE, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.VIOLET,
                         Color.MAGENTA]
@@ -497,21 +527,36 @@ XXXXXXXXXXXX
                     speed = 500
 
                 # drive
-                print(f"Driving ({self.buggy.x:4.0f}, {self.buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}")
+                print(f"Driving ({self.buggy.x:4.0f}, {self.buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}  heading = {self.buggy.direction_angle * 180 / umath.pi}")
+                self.floorplan.print_circle_path(self.buggy.x, self.buggy.y, x_target, y_target, xc, yc)
                 self.buggy.create_action(self.buggy.drive_xy(x_target, y_target, speed))
 
-        elif self.buggy.mode == self.buggy.CRASHED:
+        elif self.state != BuggyControl.CRASH_RECOVERY and self.buggy.mode == self.buggy.CRASHED:
             print(f"Crashed => recovering")
             self.buggy.hub.light.animate([Color.RED, Color.BLACK], interval=200)
-            self.buggy.create_action(self.buggy.wait(2 * 1000))
-            self.state = BuggyControl.GO_HOME
-            self.buggy.stop_action()
+            if self.buggy.create_action(self.buggy.wait(2 * 1000)):
+                self.state = BuggyControl.CRASH_RECOVERY
 
         # change state
         if self.state != BuggyControl.GO_HOME and self.state != BuggyControl.GOING_HOME and len(buttons_pressed) != 0:
             print(f"Key pressed => going home")
             self.state = BuggyControl.GO_HOME
             self.buggy.stop_action()
+
+    async def buggy_events2(self, buttons_pressed):
+        # determine next action
+        if self.buggy.mode == self.buggy.READY:
+            if self.state == BuggyControl.NOP:
+                self.state = BuggyControl.GO_HOME
+                x_target, y_target = (-11, -112)
+                speed = 1000
+
+                # drive
+                print(f"Driving ({self.buggy.x:4.0f}, {self.buggy.y:4.0f}) => ({x_target:4.0f}, {y_target:4.0f})   speed = {speed}  heading = {self.buggy.direction_angle * 180 / umath.pi}")
+                self.buggy.create_action(self.buggy.drive_xy(x_target, y_target, speed))
+
+                xc, yc = self.buggy.circle_center(self.buggy.x, self.buggy.y, x_target, y_target)
+                self.floorplan.print_circle_path(self.buggy.x, self.buggy.y, x_target, y_target, xc, yc)
 
     def run(self):
         self.buggy.run(self.buggy_events, self.state)
